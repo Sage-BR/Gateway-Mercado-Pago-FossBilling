@@ -157,13 +157,6 @@ If you see `Invalid email` errors:
 
 ## 📝 Customization
 
-### Change Fallback Email
-
-Edit in `MercadoPago.php`:
-```php
-$buyerEmail = 'noreply@yourdomain.com';
-```
-
 ### Adjust Expiration Time
 
 Edit in `MercadoPago.php`:
