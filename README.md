@@ -155,13 +155,6 @@ If you see `Invalid email` errors:
 
 ## 📝 Customization
 
-### Change Statement Descriptor
-
-Edit in `MercadoPago.php`:
-```php
-"statement_descriptor" => "YourCompany", // Max 11 characters
-```
-
 ### Change Fallback Email
 
 Edit in `MercadoPago.php`:
