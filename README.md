@@ -7,6 +7,8 @@
 
 Complete **Mercado Pago Checkout Pro** payment gateway for FOSSBilling with webhook support, HMAC signature validation, and automatic URL generation.
 
+Donate: http://url.4teambr.com/paypal
+
 ## ✨ Features
 
 - ✅ **Checkout Pro** - Secure redirect to Mercado Pago payment page
