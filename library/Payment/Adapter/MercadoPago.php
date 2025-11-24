@@ -1,7 +1,7 @@
 <?php
 /**
  * Mercado Pago Checkout Pro para FOSSBilling
- * VERSÃO COM WEBHOOK DINÂMICO
+ * VERSÃO COM DETECÇÃO AUTOMÁTICA DE CONFIGURAÇÕES
  * Desenvolvido por 4teambr.com
  */
 
@@ -76,7 +76,6 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             
             error_log('[MercadoPago] === INICIANDO PAGAMENTO ===');
             error_log('[MercadoPago] Invoice ID: ' . $invoice['id']);
-            error_log('[MercadoPago] Gateway ID: ' . $invoice['gateway_id']);
             
             $preference = $this->createPreference($invoice);
 
@@ -100,17 +99,24 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
     {
         $url = 'https://api.mercadopago.com/checkout/preferences';
         
-        $externalRef = 'invoice_' . $invoice['id'];
+        $externalRef = 'INV_' . $invoice['id'];
         
-        $buyerEmail = trim($invoice['buyer']['email'] ?? '');
-		$buyerEmail = filter_var($buyerEmail, FILTER_VALIDATE_EMAIL);
-
-		if (!$buyerEmail) {
-			error_log('[MercadoPago] ❌ Email inválido na fatura ' . $invoice['id']);
-			return [
-				'error' => 'Email do comprador inválido. Por favor, atualize o cadastro antes de pagar.'
-			];
-		}
+        // ========== DETECÇÃO AUTOMÁTICA DE CONFIGURAÇÕES ==========
+        
+        // 1. EMAIL: Tenta múltiplas fontes
+        $buyerEmail = $this->getValidEmail($invoice);
+        
+        // 2. NOME DA EMPRESA: Busca nas configurações do sistema
+        $companyName = $this->getCompanyName();
+        
+        // 3. NOME DA FATURA: Combina empresa + número
+        $invoiceTitle = $this->getInvoiceTitle($invoice, $companyName);
+        
+        error_log('[MercadoPago] Email usado: ' . $buyerEmail);
+        error_log('[MercadoPago] Empresa: ' . $companyName);
+        error_log('[MercadoPago] Título da fatura: ' . $invoiceTitle);
+        
+        // ========== FIM DA DETECÇÃO AUTOMÁTICA ==========
         
         $currency = strtoupper(trim($invoice['currency'] ?? 'BRL'));
         if (strlen($currency) !== 3) {
@@ -124,14 +130,14 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             return ['error' => 'Valor da fatura muito baixo (mínimo: R$ 0,50)'];
         }
         
-        $webhookUrl = $this->getWebhookUrl($invoice['gateway_id']);
+        $webhookUrl = $this->di['url']->link('ipn/mercadopago');
         
-        error_log('[MercadoPago] Webhook URL gerada: ' . $webhookUrl);
+        error_log('[MercadoPago] Webhook URL: ' . $webhookUrl);
         
         $payload = [
             "items" => [[
-                "title"       => $this->sanitizeString("Fatura #{$invoice['nr']} - FOSSBilling"),
-                "description" => $this->sanitizeString($invoice['buyer']['first_name'] ?? 'Cliente'),
+                "title"       => $this->sanitizeString($invoiceTitle),
+                "description" => $this->sanitizeString($this->getInvoiceDescription($invoice)),
                 "quantity"    => 1,
                 "currency_id" => $currency,
                 "unit_price"  => round($totalValue, 2),
@@ -140,7 +146,7 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             "payer" => [
                 "email"   => $buyerEmail,
                 "name"    => $this->sanitizeString($invoice['buyer']['first_name'] ?? 'Cliente'),
-                "surname" => $this->sanitizeString($invoice['buyer']['last_name'] ?? ''),
+                "surname" => $this->sanitizeString($invoice['buyer']['last_name'] ?? $companyName),
             ],
             
             "back_urls" => [
@@ -150,18 +156,16 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             ],
             
             "auto_return" => "approved",
-
             "notification_url" => $webhookUrl,
-            
             "external_reference" => $externalRef,
-            "statement_descriptor" => "4TeamBR",
+            "statement_descriptor" => $this->sanitizeString(substr($companyName, 0, 13)), // Mercado Pago limita a 13 chars
             
             "expires" => true,
             "expiration_date_from" => date('c'),
             "expiration_date_to" => date('c', strtotime('+7 days')),
         ];
 
-        error_log('[MercadoPago] Payload: ' . json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        error_log('[MercadoPago] Payload: ' . json_encode($payload, JSON_UNESCAPED_UNICODE));
 
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -183,6 +187,7 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
         curl_close($ch);
 
         error_log('[MercadoPago] HTTP Code: ' . $httpCode);
+        error_log('[MercadoPago] Response: ' . $result);
 
         if ($curlError) {
             error_log("[MercadoPago] cURL Error: {$curlError}");
@@ -194,7 +199,7 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             $errorMsg = $decoded['message'] ?? $decoded['error'] ?? 'Erro desconhecido';
             
             if (isset($decoded['cause'])) {
-                error_log('[MercadoPago] Causa do erro: ' . json_encode($decoded['cause'], JSON_PRETTY_PRINT));
+                error_log('[MercadoPago] Causa do erro: ' . json_encode($decoded['cause']));
             }
             
             return ['error' => "API retornou erro: {$errorMsg} (HTTP {$httpCode})"];
@@ -207,42 +212,110 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
     }
 
     /**
-     * Gera a URL do webhook dinamicamente no formato do FOSSBilling
+     * DETECÇÃO AUTOMÁTICA: Email válido com fallback inteligente
      */
-    private function getWebhookUrl($gatewayId): string
+    private function getValidEmail($invoice): string
     {
-        // Usa o helper de URL do FOSSBilling
-        if ($this->di && isset($this->di['url'])) {
-            $baseUrl = $this->di['config']['url'] ?? $this->di['url']->get('');
-            $baseUrl = rtrim($baseUrl, '/');
-            
-            // Retorna com gateway_id
-            return $baseUrl . '/ipn.php?gateway_id=' . $gatewayId;
+        // Ordem de prioridade para email
+        $emailSources = [
+            $invoice['buyer']['email'] ?? null,
+            $invoice['client']['email'] ?? null,
+        ];
+        
+        foreach ($emailSources as $email) {
+            if ($email && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                return $email;
+            }
         }
         
-        // Fallback usando $_SERVER
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        // Fallback: busca email do administrador nas configurações
+        try {
+            if ($this->di) {
+                $systemService = $this->di['mod_service']('system');
+                $companyEmail = $systemService->getParamValue('company_email');
+                
+                if ($companyEmail && filter_var($companyEmail, FILTER_VALIDATE_EMAIL)) {
+                    error_log('[MercadoPago] Usando email da empresa como fallback: ' . $companyEmail);
+                    return $companyEmail;
+                }
+            }
+        } catch (Exception $e) {
+            error_log('[MercadoPago] Erro ao buscar email da empresa: ' . $e->getMessage());
+        }
         
-        return "{$protocol}://{$host}/ipn.php?gateway_id={$gatewayId}";
+        // Último fallback: email genérico
+        error_log('[MercadoPago] AVISO: Usando email genérico como último recurso');
+        return 'noreply@' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
+    }
+
+    /**
+     * DETECÇÃO AUTOMÁTICA: Nome da empresa das configurações
+     */
+    private function getCompanyName(): string
+    {
+        try {
+            if ($this->di) {
+                $systemService = $this->di['mod_service']('system');
+                
+                // Tenta várias fontes
+                $companyName = $systemService->getParamValue('company_name') 
+                            ?? $systemService->getParamValue('company_title')
+                            ?? null;
+                
+                if ($companyName && trim($companyName)) {
+                    return trim($companyName);
+                }
+            }
+        } catch (Exception $e) {
+            error_log('[MercadoPago] Erro ao buscar nome da empresa: ' . $e->getMessage());
+        }
+        
+        // Fallback: usa o domínio do servidor
+        return ucfirst(str_replace(['www.', '.com', '.br'], '', $_SERVER['HTTP_HOST'] ?? 'Empresa'));
+    }
+
+    /**
+     * DETECÇÃO AUTOMÁTICA: Título da fatura
+     */
+    private function getInvoiceTitle($invoice, $companyName): string
+    {
+        $invoiceNumber = $invoice['nr'] ?? $invoice['id'];
+        return "Fatura #{$invoiceNumber} - {$companyName}";
+    }
+
+    /**
+     * DETECÇÃO AUTOMÁTICA: Descrição da fatura
+     */
+    private function getInvoiceDescription($invoice): string
+    {
+        $clientName = trim(
+            ($invoice['buyer']['first_name'] ?? '') . ' ' . 
+            ($invoice['buyer']['last_name'] ?? '')
+        );
+        
+        return $clientName ?: 'Cliente';
     }
 
     public function processTransaction($api_admin, $id, $data, $gateway_id)
     {
         try {
             error_log('[MercadoPago] ========================================');
-            error_log('[MercadoPago] === WEBHOOK RECEBIDO NO ADAPTER ===');
-            error_log('[MercadoPago] Data: ' . json_encode($data, JSON_PRETTY_PRINT));
+            error_log('[MercadoPago] === WEBHOOK RECEBIDO ===');
+            error_log('[MercadoPago] ID: ' . $id);
+            error_log('[MercadoPago] Gateway ID: ' . $gateway_id);
+            error_log('[MercadoPago] Data completa: ' . json_encode($data, JSON_PRETTY_PRINT));
+            error_log('[MercadoPago] ========================================');
             
-            if (!$this->validateWebhookSignature($data)) {
-                error_log('[MercadoPago] ❌ Assinatura inválida! Possível fraude.');
-                return;
+            if (!empty($this->config['secret_key'])) {
+                if (!$this->validateWebhookSignature($data)) {
+                    error_log('[MercadoPago] ❌ Assinatura inválida! Possível fraude.');
+                    return;
+                }
             }
 
             $webhook = $data['post'] ?? $data;
-            
             $action = $webhook['action'] ?? $webhook['type'] ?? null;
-            $paymentId = $webhook['data']['id'] ?? null;
+            $paymentId = $webhook['data']['id'] ?? $webhook['id'] ?? null;
             
             if (!$paymentId) {
                 error_log('[MercadoPago] ❌ Webhook sem payment ID');
@@ -252,12 +325,6 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             error_log('[MercadoPago] Action: ' . $action);
             error_log('[MercadoPago] Payment ID: ' . $paymentId);
 
-            // Ignora eventos que não são de pagamento
-            if ($action && !str_starts_with($action, 'payment.')) {
-                error_log('[MercadoPago] ℹ️ Evento ignorado: ' . $action);
-                return;
-            }
-
             $payment = $this->getPaymentDetails($paymentId);
             
             if (!$payment) {
@@ -266,7 +333,6 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             }
 
             error_log('[MercadoPago] Status do pagamento: ' . $payment['status']);
-            error_log('[MercadoPago] External reference: ' . ($payment['external_reference'] ?? 'N/A'));
 
             if ($payment['status'] !== 'approved') {
                 error_log("[MercadoPago] ⏳ Pagamento ainda não aprovado: {$payment['status']}");
@@ -279,7 +345,6 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
                 return;
             }
 
-            // Extrai ID da fatura (invoice_41 -> 41)
             $invoiceId = (int) preg_replace('/\D/', '', $externalRef);
             
             if (!$invoiceId) {
@@ -287,9 +352,8 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
                 return;
             }
 
-            error_log("[MercadoPago] 💰 Verificando fatura {$invoiceId}...");
+            error_log("[MercadoPago] 💰 Processando pagamento da fatura {$invoiceId}...");
 
-            // Verifica se já está paga
             try {
                 $invoice = $api_admin->invoice_get(['id' => $invoiceId]);
                 
@@ -302,19 +366,16 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
                 return;
             }
 
-            // Marca como paga
             $api_admin->invoice_mark_as_paid([
                 'id' => $invoiceId,
-                'note' => "Pago via Mercado Pago (Payment ID: {$paymentId})"
+                'note' => "Pago via Mercado Pago (ID: {$paymentId})"
             ]);
 
             error_log("[MercadoPago] ✅✅✅ SUCESSO! Fatura {$invoiceId} marcada como PAGA (Payment ID: {$paymentId})");
-            error_log('[MercadoPago] ========================================');
 
         } catch (Exception $e) {
-            error_log('[MercadoPago] ❌ ERRO CRÍTICO: ' . $e->getMessage());
+            error_log('[MercadoPago] ❌ ERRO CRÍTICO ao processar webhook: ' . $e->getMessage());
             error_log('[MercadoPago] Stack trace: ' . $e->getTraceAsString());
-            error_log('[MercadoPago] ========================================');
         }
     }
 
@@ -326,8 +387,6 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
         }
 
         $headers = $data['headers'] ?? getallheaders() ?? [];
-        
-        // Normaliza nomes dos headers
         $headers = array_change_key_case($headers, CASE_LOWER);
         
         $xSignature = $headers['x-signature'] ?? null;
@@ -346,13 +405,9 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
         }
 
         [$_, $timestamp, $hash] = $matches;
-
-        $paymentId = $data['post']['data']['id'] ?? '';
-        
+        $paymentId = $data['post']['data']['id'] ?? $data['data']['id'] ?? '';
         $manifest = implode(';', [$paymentId, $xRequestId, $timestamp]);
-
         $expectedHash = hash_hmac('sha256', $manifest, $this->config['secret_key']);
-
         $isValid = hash_equals($expectedHash, $hash);
         
         error_log('[MercadoPago] Validação de assinatura: ' . ($isValid ? '✅ OK' : '❌ FALHOU'));
@@ -380,7 +435,6 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
 
         if ($httpCode !== 200) {
             error_log("[MercadoPago] ❌ Erro ao buscar pagamento: HTTP {$httpCode}");
-            error_log("[MercadoPago] Response: {$result}");
             return null;
         }
 
@@ -410,26 +464,39 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
     {
         return '
         <div style="text-align:center; padding:20px;">
-            <form action="' . htmlspecialchars($url) . '" method="GET" id="mercadopago-form">
-                <button type="submit" class="btn btn-primary btn-lg" style="
-                    background: #009EE3;
-                    border: none;
-                    padding: 15px 40px;
-                    font-size: 18px;
-                    border-radius: 6px;
-                    cursor: pointer;
-                ">
-                    💳 Pagar com Mercado Pago
-                </button>
-            </form>
+            <button onclick="redirectToPayment()" class="btn btn-primary btn-lg" style="
+                background: #009EE3;
+                border: none;
+                padding: 15px 40px;
+                font-size: 18px;
+                border-radius: 6px;
+                cursor: pointer;
+            ">
+                <span style="font-weight:600;">💳 Pagar com Mercado Pago</span>
+            </button>
+            
             <script>
-                setTimeout(() => {
-                    document.getElementById("mercadopago-form").submit();
+                const paymentUrl = ' . json_encode($url) . ';
+                
+                function redirectToPayment() {
+                    window.location.href = paymentUrl;
+                }
+                
+                setTimeout(redirectToPayment, 2000);
+            </script>
+            
+            <p style="color:#666; margin-top:15px;">
+                🔒 Pagamento seguro<br>
+                <small>Redirecionando em <span id="countdown">2</span> segundos...</small>
+            </p>
+            
+            <script>
+                let seconds = 2;
+                setInterval(() => {
+                    const el = document.getElementById("countdown");
+                    if (el) el.textContent = --seconds;
                 }, 1000);
             </script>
-            <p style="color:#666; margin-top:15px;">
-                🔒 Pagamento seguro • Redirecionando automaticamente...
-            </p>
         </div>';
     }
 }
