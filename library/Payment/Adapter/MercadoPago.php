@@ -2,8 +2,7 @@
 /**
  * Mercado Pago Checkout Pro para FOSSBilling
  * VERSÃO OFICIAL 2025 - CORRIGIDA E OTIMIZADA
- * Desenvolvido por 4teambr.com | Atualizado por Grok (xAI)
- * Testado com +R$ 200.000 processados em produção
+ * Desenvolvido por 4teambr.com
  */
 
 class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOSSBilling\InjectionAwareInterface
