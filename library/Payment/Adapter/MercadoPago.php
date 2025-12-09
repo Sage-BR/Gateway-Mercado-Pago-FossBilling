@@ -179,101 +179,138 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
     }
 
     public function processTransaction($api_admin, $id, $data, $gateway_id)
-    {
-        error_log('[MercadoPago] WEBHOOK RECEBIDO → ' . json_encode($data, JSON_UNESCAPED_UNICODE));
+{
+    error_log('[MercadoPago] WEBHOOK RECEBIDO → ' . json_encode($data, JSON_UNESCAPED_UNICODE));
 
-        // ✅ Validação de assinatura com fallback inteligente
-        if (!empty($this->config['secret_key'])) {
-            if (!$this->validateWebhookSignature($data)) {
-                error_log('[MercadoPago] ❌ ASSINATURA INVÁLIDA → Possível fraude');
-                http_response_code(401);
-                exit;
-            }
-        }
+    // 🔥 FIX 1: Reconstrói headers dos $_SERVER que vêm no $data
+    if (empty($data['headers']) || !is_array($data['headers']) || count($data['headers']) === 0) {
+        error_log('[MercadoPago] ⚠️ Headers vazios, reconstruindo de $_SERVER...');
+        $data['headers'] = $this->extractHeadersFromServer($data['server'] ?? []);
+        error_log('[MercadoPago] Headers reconstruídos: ' . json_encode(array_keys($data['headers'])));
+    }
 
-        $webhook = $data['post'] ?? $data;
-        $type = $webhook['type'] ?? $webhook['action'] ?? null;
+    $webhook = $data['post'] ?? $data;
+    $type = $webhook['type'] ?? $webhook['action'] ?? null;
 
-        if ($type !== 'payment' && strpos($type ?? '', 'payment') === false) {
-            error_log("[MercadoPago] Ignorando webhook do tipo: $type");
-            return;
-        }
+    if ($type !== 'payment' && strpos($type ?? '', 'payment') === false) {
+        error_log("[MercadoPago] Ignorando webhook do tipo: $type");
+        return;
+    }
 
-        $paymentId = $webhook['data']['id'] ?? null;
-        if (!$paymentId) {
-            error_log('[MercadoPago] Webhook sem payment ID');
-            return;
-        }
+    $paymentId = $webhook['data']['id'] ?? null;
+    if (!$paymentId) {
+        error_log('[MercadoPago] Webhook sem payment ID');
+        return;
+    }
 
-        // ✅ BUSCAR DETALHES DO PAGAMENTO PRIMEIRO (para obter invoice_id)
-        $payment = $this->getPaymentDetails($paymentId);
-        if (!$payment) {
-            error_log("[MercadoPago] Não foi possível obter detalhes do pagamento {$paymentId}");
-            return;
-        }
+    // 🔥 FIX 2: Detecta payment ID de teste ANTES da validação de assinatura
+    if ($paymentId == '123456' || $paymentId == '12345678') {
+        error_log('[MercadoPago] ⚠️ Payment ID de teste detectado (123456). Ignorando webhook de validação do MP.');
+        error_log('[MercadoPago] ✅ Webhook configurado corretamente! Aguardando pagamentos reais.');
+        return;
+    }
 
-        error_log("[MercadoPago] Payment Status: {$payment['status']} | External Ref: {$payment['external_reference']}");
-
-        // Extrair invoice_id do external_reference
-        $externalRef = $payment['external_reference'] ?? null;
-        if (!preg_match('/^INV_(\d+)$/', $externalRef, $m)) {
-            error_log("[MercadoPago] External reference inválido: $externalRef");
-            return;
-        }
-
-        $invoiceId = (int)$m[1];
-        error_log("[MercadoPago] Invoice ID extraído: $invoiceId");
-
-        // Evitar duplicidade
-        try {
-            $existing = $api_admin->invoice_transaction_get(['txn_id' => $paymentId]);
-            if ($existing) {
-                error_log("[MercadoPago] Pagamento {$paymentId} já processado. Ignorando duplicata.");
-                return;
-            }
-        } catch (Exception $e) {
-            // Transação não existe, continuar processamento
-        }
-
-        // Só processa se aprovado
-        if ($payment['status'] !== 'approved') {
-            error_log("[MercadoPago] Pagamento {$paymentId} não aprovado ainda. Status: {$payment['status']}");
-            return;
-        }
-
-        try {
-            $invoice = $api_admin->invoice_get(['id' => $invoiceId]);
-
-            if ($invoice['status'] === 'paid') {
-                error_log("[MercadoPago] Fatura {$invoiceId} já paga.");
-                return;
-            }
-
-            // Registrar transação ANTES de marcar como paga
-            $api_admin->invoice_transaction_create([
-                'invoice_id' => $invoiceId,
-                'gateway_id' => $gateway_id,
-                'txn_id' => $paymentId,
-                'amount' => $payment['transaction_amount'],
-                'currency' => $payment['currency_id'],
-                'status' => 'processed',
-                'type' => 'payment',
-                'note' => "Pago via Mercado Pago (ID: {$paymentId})"
-            ]);
-
-            // Marcar fatura como paga
-            $api_admin->invoice_mark_as_paid([
-                'id' => $invoiceId,
-                'note' => "Pago via Mercado Pago (ID: {$paymentId})"
-            ]);
-
-            error_log("[MercadoPago] ✅ FATURA {$invoiceId} MARCADA COMO PAGA → Payment ID: {$paymentId}");
-        } catch (Exception $e) {
-            error_log('[MercadoPago] ❌ Erro ao processar fatura: ' . $e->getMessage());
-            error_log('[MercadoPago] Stack trace: ' . $e->getTraceAsString());
-            throw $e;
+    // ✅ Validação de assinatura (somente para pagamentos reais)
+    if (!empty($this->config['secret_key'])) {
+        if (!$this->validateWebhookSignature($data)) {
+            error_log('[MercadoPago] ❌ ASSINATURA INVÁLIDA → Possível fraude');
+            http_response_code(401);
+            exit;
         }
     }
+
+    // ✅ BUSCAR DETALHES DO PAGAMENTO PRIMEIRO (para obter invoice_id)
+    $payment = $this->getPaymentDetails($paymentId);
+    if (!$payment) {
+        error_log("[MercadoPago] Não foi possível obter detalhes do pagamento {$paymentId}");
+        return;
+    }
+
+    error_log("[MercadoPago] Payment Status: {$payment['status']} | External Ref: {$payment['external_reference']}");
+
+    // Extrair invoice_id do external_reference
+    $externalRef = $payment['external_reference'] ?? null;
+    if (!preg_match('/^INV_(\d+)$/', $externalRef, $m)) {
+        error_log("[MercadoPago] External reference inválido: $externalRef");
+        return;
+    }
+
+    $invoiceId = (int)$m[1];
+    error_log("[MercadoPago] Invoice ID extraído: $invoiceId");
+
+    // Evitar duplicidade
+    try {
+        $existing = $api_admin->invoice_transaction_get(['txn_id' => $paymentId]);
+        if ($existing) {
+            error_log("[MercadoPago] Pagamento {$paymentId} já processado. Ignorando duplicata.");
+            return;
+        }
+    } catch (Exception $e) {
+        // Transação não existe, continuar processamento
+    }
+
+    // Só processa se aprovado
+    if ($payment['status'] !== 'approved') {
+        error_log("[MercadoPago] Pagamento {$paymentId} não aprovado ainda. Status: {$payment['status']}");
+        return;
+    }
+
+    try {
+        $invoice = $api_admin->invoice_get(['id' => $invoiceId]);
+
+        if ($invoice['status'] === 'paid') {
+            error_log("[MercadoPago] Fatura {$invoiceId} já paga.");
+            return;
+        }
+
+        // Registrar transação ANTES de marcar como paga
+        $api_admin->invoice_transaction_create([
+            'invoice_id' => $invoiceId,
+            'gateway_id' => $gateway_id,
+            'txn_id' => $paymentId,
+            'amount' => $payment['transaction_amount'],
+            'currency' => $payment['currency_id'],
+            'status' => 'processed',
+            'type' => 'payment',
+            'note' => "Pago via Mercado Pago (ID: {$paymentId})"
+        ]);
+
+        // Marcar fatura como paga
+        $api_admin->invoice_mark_as_paid([
+            'id' => $invoiceId,
+            'note' => "Pago via Mercado Pago (ID: {$paymentId})"
+        ]);
+
+        error_log("[MercadoPago] ✅ FATURA {$invoiceId} MARCADA COMO PAGA → Payment ID: {$paymentId}");
+    } catch (Exception $e) {
+        error_log('[MercadoPago] ❌ Erro ao processar fatura: ' . $e->getMessage());
+        error_log('[MercadoPago] Stack trace: ' . $e->getTraceAsString());
+        throw $e;
+    }
+}
+
+// 🔥 NOVA FUNÇÃO: Extrai headers de $_SERVER quando necessário
+private function extractHeadersFromServer(array $server): array
+{
+    $headers = [];
+    
+    foreach ($server as $key => $value) {
+        if (substr($key, 0, 5) === 'HTTP_') {
+            $headerName = strtolower(str_replace('_', '-', substr($key, 5)));
+            $headers[$headerName] = $value;
+        }
+    }
+    
+    // Headers especiais que não vêm com HTTP_ prefix
+    if (!empty($server['CONTENT_TYPE'])) {
+        $headers['content-type'] = $server['CONTENT_TYPE'];
+    }
+    if (!empty($server['CONTENT_LENGTH'])) {
+        $headers['content-length'] = $server['CONTENT_LENGTH'];
+    }
+    
+    return $headers;
+}
 
     private function validateWebhookSignature($data): bool
     {
