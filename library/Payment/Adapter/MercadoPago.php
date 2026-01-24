@@ -23,6 +23,9 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
         if (empty($this->config['access_token'])) {
             throw new Payment_Exception('Access Token não configurado');
         }
+        if (empty($this->config['secret_key'])) {
+            throw new Payment_Exception('Secret Key não configurada');
+        }
     }
 
     public static function getConfig()
@@ -156,12 +159,10 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
 
     public function processTransaction($api_admin, $id, $data, $gateway_id)
     {
-        // ═══════════════════════════════════════════════════════════
-        // 🔐 VALIDAÇÃO DE WEBHOOK (SE SECRET_KEY CONFIGURADA)
-        // ═══════════════════════════════════════════════════════════
+        // 1. VALIDAÇÃO DE SEGURANÇA (HMAC) - Proteção contra ataques
         if (!empty($this->config['secret_key'])) {
             $headers = $data['headers'] ?? [];
-            $headers = array_change_key_case($headers, CASE_LOWER);
+            $headers = array_change_key_case($headers, CASE_LOWER); // Normaliza para minúsculas
 
             $xSignature = $headers['x-signature'] ?? $data['server']['HTTP_X_SIGNATURE'] ?? $_SERVER['HTTP_X_SIGNATURE'] ?? '';
             $xRequestId = $headers['x-request-id'] ?? $data['server']['HTTP_X_REQUEST_ID'] ?? $_SERVER['HTTP_X_REQUEST_ID'] ?? '';
@@ -182,20 +183,22 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
                 }
 
                 if ($ts && $hash) {
+                    // Template padrão: id:[id];request-timestamp:[ts];request-url:[url];signed-data:[data]
+                    // A URL vem do header x-request-url (ou vazio se não enviado)
                     $requestUrl = $headers['x-request-url'] ?? $data['server']['HTTP_X_REQUEST_URL'] ?? $_SERVER['HTTP_X_REQUEST_URL'] ?? '';
                     
-                    // Template oficial do Mercado Pago
                     $manifest = "id:$xRequestId;request-timestamp:$ts;request-url:$requestUrl;signed-data:$payload";
                     $sha = hash_hmac('sha256', $manifest, $this->config['secret_key']);
                     
                     if (!hash_equals($sha, $hash)) {
-                        // Loga o erro mas NÃO bloqueia ainda (Soft Launch)
+                        // Loga o erro mas NÃO bloqueia ainda para evitar falsos positivos iniciais
+                        // Quando tiver certeza que funciona, pode descomentar o return
                         error_log('[MercadoPago] ⚠️ Assinatura Inválida (HMAC Mismatch)');
                         error_log('[MercadoPago] Esperado: ' . $sha);
                         error_log('[MercadoPago] Recebido: ' . $hash);
+                        // error_log('[MercadoPago] Manifest: ' . $manifest);
                         
-                        // http_response_code(401);
-                        // return; 
+                        // return; // <--- DESCOMENTE AQUI PARA ATIVAR O BLOQUEIO REAL
                     } else {
                          error_log('[MercadoPago] ✅ Webhook validado com sucesso');
                     }
@@ -207,9 +210,7 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
             }
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // 📦 PROCESSAMENTO DO WEBHOOK
-        // ═══════════════════════════════════════════════════════════
+        // O webhook do MP vem no formato: {"type":"payment","data":{"id":"123456"}}
         $webhook = $data['post'] ?? [];
         $type = $webhook['type'] ?? $webhook['action'] ?? 'DESCONHECIDO';
 
