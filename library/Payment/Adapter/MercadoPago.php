@@ -48,8 +48,8 @@ class Payment_Adapter_MercadoPago extends Payment_AdapterAbstract implements FOS
                 'secret_key' => [
                     'text',
                     [
-                        'label' => 'Secret Key (Opcional)',
-                        'description' => 'Para validar webhooks. Recomendado em produção.',
+                        'label' => 'Secret Key',
+                        'description' => 'Para validar webhooks. Configure nas notificações do MP.',
                         'required' => false,
                     ],
                 ],
